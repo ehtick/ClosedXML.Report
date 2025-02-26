@@ -50,13 +50,15 @@ namespace ClosedXML.Report
             Name = name;
             Source = name;
             var rangeName = name + "_tpl";
-            if (range.Worksheet.NamedRanges.TryGetValue(rangeName, out var namedRange) || wb.NamedRanges.TryGetValue(rangeName, out namedRange))
+            if (range.Worksheet.DefinedNames.TryGetValue(rangeName, out var namedRange) || wb.DefinedNames.TryGetValue(rangeName, out namedRange))
             {
-                namedRange.Add(range);
+                var ranges = namedRange.Ranges;
+                ranges.Add(range);
+                namedRange.SetRefersTo(ranges);
             }
             else
             {
-                range.Worksheet.NamedRanges.Add(rangeName, range);
+                range.Worksheet.DefinedNames.Add(rangeName, range);
             }
 
             _evaluator = new FormulaEvaluator();
@@ -67,7 +69,6 @@ namespace ClosedXML.Report
             _rowCnt = rowCnt;
             _colCnt = colCnt;
         }
-
 
         public static RangeTemplate Parse(string name, IXLRange range, TemplateErrors errors, IDictionary<string, object> globalVariables)
         {
@@ -130,7 +131,7 @@ namespace ClosedXML.Report
             return result;
         }
 
-        private static IEnumerable<IXLNamedRange> GetInnerRanges(IXLRange prng)
+        private static IEnumerable<IXLDefinedName> GetInnerRanges(IXLRange prng)
         {
             var containings = prng.GetContainingNames().ToArray();
             return from nr in containings
@@ -366,21 +367,21 @@ namespace ClosedXML.Report
             RenderCell(evaluator, cell, new Parameter("item", items[i]), new Parameter("index", i));
         }
 
-        private void RenderSubrange(RangeTemplate ownRng, object item, FormulaEvaluator evaluator, TemplateCell cell,
+        private void RenderSubrange(RangeTemplate subrange, object item, FormulaEvaluator evaluator, TemplateCell cell,
             TagsList tags, ref int iCell, ref int row)
         {
             var start = _buff.NextAddress;
             // the child template to which the cell belongs
-            var formula = ownRng.Source.ReplaceLast("_", ".");
+            var formula = subrange.Source.ReplaceLast("_", ".");
 
             if (evaluator.Evaluate(formula, new Parameter(Name, item)) is IEnumerable value)
             {
                 var valArr = value.Cast<object>().ToArray();
-                ownRng.Generate(valArr);
+                subrange.Generate(valArr);
 
-                if (ownRng.IsHorizontal)
+                if (subrange.IsHorizontal)
                 {
-                    int shiftLen = ownRng._colCnt * (valArr.Length - 1);
+                    int shiftLen = subrange._colCnt * (valArr.Length - 1);
                     tags.Where(tag => tag.Cell.Row == cell.Row && tag.Cell.Column > cell.Column)
                         .ForEach(t =>
                         {
@@ -391,13 +392,13 @@ namespace ClosedXML.Report
                 else
                 {
                     // move current template cell to next (skip subrange)
-                    row += ownRng._rowCnt + 1;
+                    row += subrange._rowCnt + 1;
                     while (_cells[iCell].Row <= row - 1)
                         iCell++;
 
                     iCell--; // roll back. After it became clear that it was too much, we must go back.
 
-                    int shiftLen = ownRng._rowCnt * (valArr.Length - 1);
+                    int shiftLen = subrange._rowCnt * (valArr.Length - 1);
                     tags.Where(tag => tag.Cell.Row > cell.Row)
                         .ForEach(t =>
                         {
@@ -408,8 +409,8 @@ namespace ClosedXML.Report
             }
 
             var rng = _buff.GetRange(start, _buff.PrevAddress);
-            var rangeName = ownRng.Name;
-            var dnr = rng.Worksheet.Workbook.NamedRange(rangeName);
+            var rangeName = subrange.Name;
+            var dnr = rng.Worksheet.Workbook.DefinedName(rangeName);
             dnr.SetRefersTo(rng);
         }
 
@@ -473,19 +474,7 @@ namespace ClosedXML.Report
 
             foreach (var cell in cells)
             {
-                OptionTag[] tags;
-                string newValue;
-                if (cell.CellType == TemplateCellType.Formula)
-                {
-                    tags = _tagsEvaluator.Parse(cell.Formula, range, cell, out newValue);
-                    cell.Formula = newValue;
-                }
-                else
-                {
-                    tags = _tagsEvaluator.Parse(cell.GetString(), range, cell, out newValue);
-                    cell.Value = newValue;
-                }
-
+                OptionTag[] tags = _tagsEvaluator.ApplyTagsTo(cell, range);
                 foreach (var optionTag in tags)
                 {
                     if (cell.Row > 1 && cell.Row == _rowCnt)
